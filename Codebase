@@ -1,0 +1,616 @@
+
+Config files
+Config_deploy.yml
+{
+    "model_output_dir": "/dbfs/FileStore/ds_models/", # the path to the dir holding the trained model
+    "scaler_file_path": "/dbfs/FileStore/ds_models/scaler/scaler.pkl", # the path to the dir holding the scaler needed for dara transformation
+    "model_uuid": "86f1133b-1037-4654-9136-949cbc280412", # the unique uuid identifying the model to be loaded
+    "test_set_data_path": "../data/test_set.pkl", # the path to the test data feature set for inference
+}
+
+Config_deploy.yml
+{
+    "experiment_name": "/Users/abhishek.shivkumar@msamlin.com/iris_classifier_v0.1", # name of the experiment on MLFlow
+    "model_output_dir": "/dbfs/FileStore/ds_models/", # the path to the output dir holding the final trained model
+    "scaler_output_dir": "/dbfs/FileStore/ds_models/scaler/", # the path to the output dir holding the final scaler for transforming the dataset
+    "train_set_data_path": "../data/train_set.pkl", # the path to the training feature set
+    "train_target_data_path": "../data/train_target.pkl", # the path to the training target
+    "val_set_data_path": "../data/val_set.pkl", # the path to the validation feature set
+    "val_target_data_path": "../data/val_target.pkl", # the path to the validatiom target
+    "test_set_data_path": "../data/test_set.pkl", # the path to the test feature set
+    "test_target_data_path": "../data/test_target.pkl", # the path to the test target
+    "lr": 0.01,
+    "optim": "sgd",
+    "batch_size": 20
+}
+
+Data folder
+Dataset.py
+import pandas as pd
+import yaml
+import os
+from sklearn.preprocessing import Normalizer, LabelEncoder
+from sklearn.model_selection import train_test_split
+from pickle import dump
+
+class CustomDataset:
+    def __init__(self, config):
+        '''
+        The init method to initialize the dataset class using the parameters from the config file
+
+            Parameters:
+                    config (dict): A dictionary with all the configuration related parameters required to initiatize the dataset class
+
+            Returns:
+                   None
+        '''
+        self.config = config
+        self.train_set, self.train_target, self.train_labels = pd.read_pickle(config['train_set_data_path']), pd.read_pickle(config['train_target_data_path']), None
+        self.val_set, self.val_target, self.val_labels = pd.read_pickle(config['val_set_data_path']), pd.read_pickle(config['val_target_data_path']), None
+        self.test_set, self.test_target, self.test_labels = pd.read_pickle(config['test_set_data_path']), pd.read_pickle(config['test_target_data_path']), None
+        self.num_classes = self._get_num_classes()
+
+    def _get_num_classes(self):
+        '''
+        Returns the number of classes within the dataset
+
+            Parameters:
+                    None
+
+            Returns:
+                   num_of_classes (int): Returns the number of classes within the dataset
+        '''
+        num_of_classes = len(set(self.train_target))
+        return num_of_classes
+
+    def __len__(self):
+        '''
+        Returns the number of samples in the dataset
+
+            Parameters:
+                    None
+
+            Returns:
+                   num_of_items (int): Returns the numebr of items in the dataset
+        '''
+        num_of_items = self.dataset.shape[0]
+        return num_of_items
+
+    def get_class_label_map(self):
+        '''
+        Returns a dictionary representing the class label map 
+
+            Parameters:
+                    None
+
+            Returns:
+                   class_label_map (dict): A dictionary representing the class label map
+        '''
+        class_label_map = dict(zip(self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_).tolist()))
+        return class_label_map
+
+    def preprocess_dataset(self):
+        '''
+        Preprocess the dataset for training, validation and testing
+
+            Parameters:
+                    None
+
+            Returns:
+                   None
+        '''
+        scaler = Normalizer()
+        self.train_set = scaler.fit_transform(self.train_set)
+        # strore the scaler for inference
+        if os.path.exists(self.config['scaler_output_dir']) is False:
+            os.mkdir(self.config['scaler_output_dir'])
+        dump(scaler, open(os.path.join(self.config['scaler_output_dir'], 'scaler.pkl'), 'wb'))
+
+        self.val_set = scaler.transform(self.val_set)
+        self.test_set = scaler.transform(self.test_set)
+
+        self.label_encoder = LabelEncoder()
+        self.train_labels = self.label_encoder.fit_transform(self.train_target)
+        self.val_labels = self.label_encoder.transform(self.val_target)
+        self.test_labels = self.label_encoder.transform(self.test_target)
+
+
+src
+infer.ipynb.py
+# Databricks notebook source
+# MAGIC %md
+# MAGIC ## Install any relevant packages
+
+# COMMAND ----------
+
+# MAGIC %pip install mlflow
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Import relevant packages
+
+# COMMAND ----------
+
+import pandas as pd
+import numpy as np
+import yaml
+import mlflow
+import seaborn as sn
+import matplotlib.pyplot as plt
+import uuid
+import pickle
+import os 
+from sklearn.neural_network import MLPClassifier
+from data.dataset import CustomDataset
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from pickle import load
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Read deploy config file
+
+# COMMAND ----------
+
+# read config file. Had all parameters for deploying the model
+config_path = "../config/config_deploy.yaml"
+model_uuid = None
+config = None
+with open(config_path, "r") as stream:
+    try:
+        config = yaml.safe_load(stream)
+    except Exception as e:
+        print(f'There was a problem reading the config file')
+        print(str(e))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Read dataset and do any preprocessing
+
+# COMMAND ----------
+
+# read the dataset for inference 
+feature_cols = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width']
+dataset_path = config['test_set_data_path']
+dataset = pd.read_pickle(dataset_path)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load model using params inside the config file
+
+# COMMAND ----------
+
+# load the model using the model uuid from the config file. Model uuid taken from MlFlow dashboard
+model_path = os.path.join(config['model_output_dir'], config['model_uuid'] + '.pkl')
+model = pickle.load(open(model_path, 'rb'))
+
+# COMMAND ----------
+
+# specify the class label map. Taken from MLFlow dashboard
+class_label_map = {"Iris-setosa": 0, "Iris-versicolor": 1, "Iris-virginica": 2}
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Load the input data
+
+# COMMAND ----------
+
+# load a sample data
+sample_data = dataset.iloc[0][feature_cols]
+print(sample_data)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Transform the data
+
+# COMMAND ----------
+
+# load the scaler from the config file
+scaler = load(open(config['scaler_file_path'], 'rb'))
+sample_data = scaler.transform([sample_data])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Transform the labels from the model output to reaadable names
+
+# COMMAND ----------
+
+def get_class_label(index):
+    '''
+    Returns the class label given the index
+
+        Parameters:
+                index (int): The index (0, 1, 2, .. and so on) representing the class index
+
+        Returns:
+                None
+    '''
+    return [label for label in class_label_map if class_label_map[label] == index][0]
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Send the input data to the model 
+
+# COMMAND ----------
+
+# pedict the output using the sample data and the model
+output = model.predict(sample_data)[0]
+output_label = get_class_label(output)
+print(f'The output class label is {output_label}')
+
+# COMMAND ----------
+
+train.ipynb.py
+# Databricks notebook source
+# install required packages
+%pip install mlflow
+%pip install seaborn
+
+# COMMAND ----------
+
+import pandas as pd
+import numpy as np
+import json
+import yaml
+import mlflow
+import seaborn as sn
+import matplotlib.pyplot as plt
+import uuid
+import pickle
+import os 
+from sklearn.neural_network import MLPClassifier
+from data.dataset import CustomDataset
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+
+# read config file
+config_path = "../config/config_training.yaml"
+model_uuid = str(uuid.uuid4())
+config = None
+with open(config_path, "r") as stream:
+    try:
+        config = yaml.safe_load(stream)
+    except Exception as e:
+        print(f'There was a problem reading the config file')
+        print(str(e))
+
+# COMMAND ----------
+
+# create a dataset from the config file
+dataset = CustomDataset(config)
+dataset.preprocess_dataset()
+
+# COMMAND ----------
+
+!ls ../data
+
+# COMMAND ----------
+
+def create_model():
+    '''
+    Returns the ML model used for classification.
+
+            Parameters:
+                    None
+
+            Returns:
+                    clf (Scikit-Learn Model): The actual ML model as a Python object
+    '''
+    clf = MLPClassifier(solver='sgd', alpha=1e-5, hidden_layer_sizes=(3, 3), learning_rate_init=config['lr'], batch_size=config['batch_size'], random_state=1)
+    return clf
+
+model = create_model()
+
+# COMMAND ----------
+
+def compute_accuracy(y_true, y_pred):
+    '''
+    Returns the accuracy metric given the ground truth and the predictions.
+
+            Parameters:
+                    y_pred (list): The list representing the predicted values
+                    y_true (list): The list representing the true values
+
+            Returns:
+                    accuracy_score (float): The accuracy score for the predited results
+    '''
+    return accuracy_score(y_true, y_pred)
+
+# COMMAND ----------
+
+def log_confusion_matrix(cm, classes, file_name):
+    '''
+    Logs the confusion matrix to MLFlow
+
+            Parameters:
+                    cm (numpy ndarray): A decimal integer
+                    classes (list): The list of class names in the confusio matrix
+                    file_name (str): The name of the file storing the confusion matrix
+
+            Returns:
+                    None
+    '''
+    df_cfm = pd.DataFrame(cm, index = classes, columns = classes)
+    cfm_plot = sn.heatmap(df_cfm, annot=True)
+    plt.figure()
+    plt.xlabel('predicted class')
+    plt.ylabel('ground truth class')
+    cfm_plot.figure.savefig(file_name)
+    # log into mlflow
+    mlflow.log_artifact(file_name)
+
+# COMMAND ----------
+
+def log_classification_report(y_true, y_pred, file_name):
+    '''
+    Logs the classification report to MLFlow
+
+            Parameters:
+                    y_pred (list): The list representing the predicted values
+                    y_true (list): The list representing the true values
+
+            Returns:
+                    None
+    '''
+    report = classification_report(y_true, y_pred, output_dict=True)
+    df = pd.DataFrame(report).transpose()
+    df.index.names = ['class_name']
+    df.to_csv(file_name)
+    # log into mlflow
+    mlflow.log_artifact(file_name)   
+
+# COMMAND ----------
+
+def test_model(dataset):   
+    '''
+    A method to test the trained model on the test data
+
+            Parameters:
+                    dataset (Dataset): An instance of the Dataset class containing all aspects of the data
+
+            Returns:
+                    test_metrics (dict): A dictionary with the result metrics as a dictionary
+    '''
+    test_pred = model.predict(dataset.test_set)
+    
+    # conpute any metric of interest
+    test_acc = compute_accuracy(test_pred, dataset.test_labels)
+    
+    # create confusion matrix image
+    cm = confusion_matrix(dataset.test_labels, test_pred)
+    classes = dataset.get_class_label_map().keys()
+
+    # create confusion matrix image
+    log_confusion_matrix(cm, classes, 'test_cfm.png')
+    
+    # generate classification report
+    log_classification_report(dataset.test_labels, test_pred, 'test_cr.csv')
+   
+    
+    # capture all metrics of interest here
+    test_metrics = {
+        'test_acc': test_acc
+    }
+    
+    return test_metrics
+
+# COMMAND ----------
+
+def validate_model(dataset): 
+    '''
+    A method to validate the trained model on the validation data
+
+            Parameters:
+                    dataset (Dataset): An instance of the Dataset class containing all aspects of the data
+
+            Returns:
+                    val_metrics (dict): A dictionary with the result metrics as a dictionary
+    '''   
+    val_pred = model.predict(dataset.val_set)
+    
+    # conpute any metric of interest
+    val_acc = compute_accuracy(val_pred, dataset.val_labels)
+    
+    cm = confusion_matrix(dataset.val_labels, val_pred)
+    classes = dataset.get_class_label_map().keys()
+
+    # create confusion matrix image
+    log_confusion_matrix(cm, classes, 'val_cfm.png')
+    
+    # generate classification report
+    log_classification_report(dataset.val_labels, val_pred, 'val_cr.csv')
+    
+    # capture all metrics of interest here
+    val_metrics = {
+        'val_acc': val_acc
+    }
+    
+    return val_metrics
+
+# COMMAND ----------
+
+def train_model(dataset):
+    '''
+    A method to train the model on the training data
+
+            Parameters:
+                    dataset (Dataset): An instance of the Dataset class containing all aspects of the data
+
+            Returns:
+                    train_metrics (dict): A dictionary with the result metrics as a dictionary
+    '''
+    model.fit(dataset.train_set, dataset.train_labels)
+    train_pred = model.predict(dataset.train_set)
+    
+    # conpute any metric of interest
+    train_acc = compute_accuracy(train_pred, dataset.train_labels)
+    
+    
+    cm = confusion_matrix(dataset.train_labels, train_pred)
+    classes = dataset.get_class_label_map().keys()
+
+    # create confusion matrix image
+    log_confusion_matrix(cm, classes, 'train_cfm.png')
+    
+    # generate classification report
+    log_classification_report(dataset.train_labels, train_pred, 'train_cr.csv')
+    
+    
+    # capture all metrics of interest here
+    train_metrics = {
+        'train_acc': train_acc
+    }
+    
+    return train_metrics
+    
+
+# COMMAND ----------
+
+# method to log all metrics into mlflow
+def log_metrics(metrics):
+    '''
+    A method to log various metrics of the model to MLFlow
+
+            Parameters:
+                    metrics (dict): A dictionary containing various metrics as key and values
+
+            Returns:
+                    None
+    '''
+    for key, val in metrics.items():
+        mlflow.log_metric(key, val)
+
+# COMMAND ----------
+
+def log_params(config):
+    '''
+    A method to log various parameters of the model to MLFlow
+
+            Parameters:
+                    config (dict): A dictionary containing various configuration parameters as key and values
+
+            Returns:
+                    None
+    '''
+    for key, val in config.items():
+        mlflow.log_param(key, val)
+        
+    mlflow.log_dict(json.dumps(dataset.get_class_label_map()), "class_labels.json")
+
+# COMMAND ----------
+
+mlflow.set_experiment(config['experiment_name'])
+run_description = """
+    This is a boilerplate code to demonstrate classification over the IRIS dataset.
+"""
+with mlflow.start_run(description=run_description):
+    mlflow.set_tag('model_uuid', model_uuid)
+    log_params(config)
+    train_metrics = train_model(dataset)
+    log_metrics(train_metrics)
+    
+    val_metrics = validate_model(dataset)
+    log_metrics(val_metrics)
+    
+    test_metrics = test_model(dataset)
+    log_metrics(test_metrics)
+    
+
+# COMMAND ----------
+
+# save model to a destination directory
+model_file_path = os.path.join(config['model_output_dir'], model_uuid +'.pkl')
+pickle.dump(model, open(model_file_path, 'wb'))
+
+
+utils
+split_dataset.ipynb.py
+# Databricks notebook source
+# MAGIC %md
+# MAGIC ## Import the relevant packages
+
+# COMMAND ----------
+
+import pandas as pd
+import yaml
+import pickle
+import os
+from sklearn import preprocessing
+from sklearn.model_selection import train_test_split
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Define where the Dataset is present
+
+# COMMAND ----------
+
+input_data_path = "../data/iris.data" # this can change based on where it is present
+output_data_path = '../data/' # this can change based on where it should be output
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Define the features, target variables and split
+
+# COMMAND ----------
+
+target_variable = 'flower_type'
+feature_cols = ['sepal_length', 'sepal_width', 'petal_length', 'petal_width']
+test_size = 0.2
+val_size = 0.2
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Read the dataset
+
+# COMMAND ----------
+
+dataset = pd.read_csv(input_data_path, header=None, names=feature_cols + [target_variable])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Split the dataset into Train, Val and Test 
+
+# COMMAND ----------
+
+train_val_set, test_set, train_val_target, test_target = train_test_split(dataset[feature_cols], dataset[target_variable], test_size=test_size, shuffle=True, stratify=dataset[target_variable])
+train_set, val_set, train_target, val_target = train_test_split(train_val_set, train_val_target, test_size=val_size, shuffle=True, stratify=train_val_target)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Store the dataset
+
+# COMMAND ----------
+
+with open(os.path.join(output_data_path, 'train_set.pkl'), 'wb') as f:
+    pickle.dump(train_set, f)
+with open(os.path.join(output_data_path, 'train_target.pkl'), 'wb') as f:
+    pickle.dump(train_target, f)
+
+with open(os.path.join(output_data_path, 'val_set.pkl'), 'wb') as f:
+    pickle.dump(val_set, f)
+with open(os.path.join(output_data_path, 'val_target.pkl'), 'wb') as f:
+    pickle.dump(val_target, f)
+
+with open(os.path.join(output_data_path, 'test_set.pkl'), 'wb') as f:
+    pickle.dump(test_set, f)
+with open(os.path.join(output_data_path, 'test_target.pkl'), 'wb') as f:
+    pickle.dump(test_target, f)
+
+# COMMAND ----------
+
+
+
+
+    
+
